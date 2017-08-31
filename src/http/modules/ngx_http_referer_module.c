@@ -32,7 +32,6 @@ typedef struct {
 } ngx_http_referer_conf_t;
 
 
-static ngx_int_t ngx_http_referer_add_variables(ngx_conf_t *cf);
 static void * ngx_http_referer_create_conf(ngx_conf_t *cf);
 static char * ngx_http_referer_merge_conf(ngx_conf_t *cf, void *parent,
     void *child);
@@ -78,7 +77,7 @@ static ngx_command_t  ngx_http_referer_commands[] = {
 
 
 static ngx_http_module_t  ngx_http_referer_module_ctx = {
-    ngx_http_referer_add_variables,        /* preconfiguration */
+    NULL,                                  /* preconfiguration */
     NULL,                                  /* postconfiguration */
 
     NULL,                                  /* create main configuration */
@@ -106,9 +105,6 @@ ngx_module_t  ngx_http_referer_module = {
     NULL,                                  /* exit master */
     NGX_MODULE_V1_PADDING
 };
-
-
-static ngx_str_t  ngx_http_invalid_referer_name = ngx_string("invalid_referer");
 
 
 static ngx_int_t
@@ -262,23 +258,6 @@ uri:
 valid:
 
     *v = ngx_http_variable_null_value;
-
-    return NGX_OK;
-}
-
-
-static ngx_int_t
-ngx_http_referer_add_variables(ngx_conf_t *cf)
-{
-    ngx_http_variable_t  *var;
-
-    var = ngx_http_add_variable(cf, &ngx_http_invalid_referer_name,
-                                NGX_HTTP_VAR_CHANGEABLE);
-    if (var == NULL) {
-        return NGX_ERROR;
-    }
-
-    var->get_handler = ngx_http_referer_variable;
 
     return NGX_OK;
 }
@@ -473,9 +452,19 @@ ngx_http_valid_referers(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_referer_conf_t  *rlcf = conf;
 
-    u_char      *p;
-    ngx_str_t   *value, uri;
-    ngx_uint_t   i;
+    u_char                    *p;
+    ngx_str_t                 *value, uri, name;
+    ngx_uint_t                 i;
+    ngx_http_variable_t       *var;
+
+    ngx_str_set(&name, "invalid_referer");
+
+    var = ngx_http_add_variable(cf, &name, NGX_HTTP_VAR_CHANGEABLE);
+    if (var == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    var->get_handler = ngx_http_referer_variable;
 
     if (rlcf->keys == NULL) {
         rlcf->keys = ngx_pcalloc(cf->temp_pool, sizeof(ngx_hash_keys_arrays_t));

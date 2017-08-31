@@ -105,8 +105,6 @@ static void ngx_resolver_rbtree_insert_value(ngx_rbtree_node_t *temp,
     ngx_rbtree_node_t *node, ngx_rbtree_node_t *sentinel);
 static ngx_int_t ngx_resolver_copy(ngx_resolver_t *r, ngx_str_t *name,
     u_char *buf, u_char *src, u_char *last);
-static ngx_int_t ngx_resolver_set_timeout(ngx_resolver_t *r,
-    ngx_resolver_ctx_t *ctx);
 static void ngx_resolver_timeout_handler(ngx_event_t *ev);
 static void ngx_resolver_free_node(ngx_resolver_t *r, ngx_resolver_node_t *rn);
 static void *ngx_resolver_alloc(ngx_resolver_t *r, size_t size);
@@ -191,7 +189,6 @@ ngx_resolver_create(ngx_conf_t *cf, ngx_str_t *names, ngx_uint_t n)
     r->event->handler = ngx_resolver_resend_handler;
     r->event->data = r;
     r->event->log = &cf->cycle->new_log;
-    r->event->cancelable = 1;
     r->ident = -1;
 
     r->resend_timeout = 5;
@@ -731,8 +728,19 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
         }
 
         if (rn->waiting) {
-            if (ngx_resolver_set_timeout(r, ctx) != NGX_OK) {
-                return NGX_ERROR;
+
+            if (ctx->event == NULL && ctx->timeout) {
+                ctx->event = ngx_resolver_calloc(r, sizeof(ngx_event_t));
+                if (ctx->event == NULL) {
+                    return NGX_ERROR;
+                }
+
+                ctx->event->handler = ngx_resolver_timeout_handler;
+                ctx->event->data = ctx;
+                ctx->event->log = r->log;
+                ctx->ident = -1;
+
+                ngx_add_timer(ctx->event, ctx->timeout);
             }
 
             last->next = rn->waiting;
@@ -856,8 +864,18 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
         goto failed;
     }
 
-    if (ngx_resolver_set_timeout(r, ctx) != NGX_OK) {
-        goto failed;
+    if (ctx->event == NULL && ctx->timeout) {
+        ctx->event = ngx_resolver_calloc(r, sizeof(ngx_event_t));
+        if (ctx->event == NULL) {
+            goto failed;
+        }
+
+        ctx->event->handler = ngx_resolver_timeout_handler;
+        ctx->event->data = ctx;
+        ctx->event->log = r->log;
+        ctx->ident = -1;
+
+        ngx_add_timer(ctx->event, ctx->timeout);
     }
 
     if (ngx_resolver_resend_empty(r)) {
@@ -989,8 +1007,19 @@ ngx_resolve_addr(ngx_resolver_ctx_t *ctx)
         }
 
         if (rn->waiting) {
-            if (ngx_resolver_set_timeout(r, ctx) != NGX_OK) {
-                return NGX_ERROR;
+
+            if (ctx->event == NULL && ctx->timeout) {
+                ctx->event = ngx_resolver_calloc(r, sizeof(ngx_event_t));
+                if (ctx->event == NULL) {
+                    return NGX_ERROR;
+                }
+
+                ctx->event->handler = ngx_resolver_timeout_handler;
+                ctx->event->data = ctx;
+                ctx->event->log = r->log;
+                ctx->ident = -1;
+
+                ngx_add_timer(ctx->event, ctx->timeout);
             }
 
             ctx->next = rn->waiting;
@@ -1060,8 +1089,18 @@ ngx_resolve_addr(ngx_resolver_ctx_t *ctx)
         goto failed;
     }
 
-    if (ngx_resolver_set_timeout(r, ctx) != NGX_OK) {
-        goto failed;
+    if (ctx->event == NULL && ctx->timeout) {
+        ctx->event = ngx_resolver_calloc(r, sizeof(ngx_event_t));
+        if (ctx->event == NULL) {
+            goto failed;
+        }
+
+        ctx->event->handler = ngx_resolver_timeout_handler;
+        ctx->event->data = ctx;
+        ctx->event->log = r->log;
+        ctx->ident = -1;
+
+        ngx_add_timer(ctx->event, ctx->timeout);
     }
 
     if (ngx_resolver_resend_empty(r)) {
@@ -2995,15 +3034,25 @@ ngx_resolver_srv_names_handler(ngx_resolver_ctx_t *cctx)
 
         addrs = ngx_resolver_calloc(r, cctx->naddrs * sizeof(ngx_addr_t));
         if (addrs == NULL) {
-            srv->state = NGX_ERROR;
-            goto done;
+            ngx_resolve_name_done(cctx);
+
+            ctx->state = NGX_ERROR;
+            ctx->valid = ngx_time() + (r->valid ? r->valid : 10);
+
+            ctx->handler(ctx);
+            return;
         }
 
         sockaddr = ngx_resolver_alloc(r, cctx->naddrs * sizeof(ngx_sockaddr_t));
         if (sockaddr == NULL) {
             ngx_resolver_free(r, addrs);
-            srv->state = NGX_ERROR;
-            goto done;
+            ngx_resolve_name_done(cctx);
+
+            ctx->state = NGX_ERROR;
+            ctx->valid = ngx_time() + (r->valid ? r->valid : 10);
+
+            ctx->handler(ctx);
+            return;
         }
 
         for (i = 0; i < cctx->naddrs; i++) {
@@ -3019,8 +3068,6 @@ ngx_resolver_srv_names_handler(ngx_resolver_ctx_t *cctx)
         srv->addrs = addrs;
         srv->naddrs = cctx->naddrs;
     }
-
-done:
 
     ngx_resolve_name_done(cctx);
 
@@ -3994,30 +4041,6 @@ done:
 }
 
 
-static ngx_int_t
-ngx_resolver_set_timeout(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx)
-{
-    if (ctx->event || ctx->timeout == 0) {
-        return NGX_OK;
-    }
-
-    ctx->event = ngx_resolver_calloc(r, sizeof(ngx_event_t));
-    if (ctx->event == NULL) {
-        return NGX_ERROR;
-    }
-
-    ctx->event->handler = ngx_resolver_timeout_handler;
-    ctx->event->data = ctx;
-    ctx->event->log = r->log;
-    ctx->event->cancelable = ctx->cancelable;
-    ctx->ident = -1;
-
-    ngx_add_timer(ctx->event, ctx->timeout);
-
-    return NGX_OK;
-}
-
-
 static void
 ngx_resolver_timeout_handler(ngx_event_t *ev)
 {
@@ -4231,21 +4254,10 @@ ngx_resolver_report_srv(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx)
     ngx_resolver_addr_t      *addrs;
     ngx_resolver_srv_name_t  *srvs;
 
-    srvs = ctx->srvs;
-    nsrvs = ctx->nsrvs;
-
     naddrs = 0;
 
-    for (i = 0; i < nsrvs; i++) {
-        if (srvs[i].state == NGX_ERROR) {
-            ctx->state = NGX_ERROR;
-            ctx->valid = ngx_time() + (r->valid ? r->valid : 10);
-
-            ctx->handler(ctx);
-            return;
-        }
-
-        naddrs += srvs[i].naddrs;
+    for (i = 0; i < ctx->nsrvs; i++) {
+        naddrs += ctx->srvs[i].naddrs;
     }
 
     if (naddrs == 0) {
@@ -4264,6 +4276,9 @@ ngx_resolver_report_srv(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx)
         ctx->handler(ctx);
         return;
     }
+
+    srvs = ctx->srvs;
+    nsrvs = ctx->nsrvs;
 
     i = 0;
     n = 0;
